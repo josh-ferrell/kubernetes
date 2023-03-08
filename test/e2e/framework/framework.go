@@ -38,6 +38,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/runtime/schema"
+	"k8s.io/apimachinery/pkg/util/version"
 	"k8s.io/apimachinery/pkg/util/wait"
 	v1svc "k8s.io/client-go/applyconfigurations/core/v1"
 	"k8s.io/client-go/discovery"
@@ -124,6 +125,8 @@ type Framework struct {
 
 	// Timeouts contains the custom timeouts used during the test execution.
 	Timeouts *TimeoutContext
+
+	ClusterVersion *version.Version
 
 	// DumpAllNamespaceInfo is invoked by the framework to record
 	// information about a namespace after a test failure.
@@ -246,6 +249,12 @@ func (f *Framework) BeforeEach(ctx context.Context) {
 
 	TestContext.CloudConfig.Provider.FrameworkBeforeEach(f)
 
+	serverVersion, err := f.ClientSet.Discovery().ServerVersion()
+	ExpectNoError(err)
+	version, err := version.ParseSemantic(serverVersion.GitVersion)
+	ExpectNoError(err)
+	f.ClusterVersion = version
+
 	if !f.SkipNamespaceCreation {
 		ginkgo.By(fmt.Sprintf("Building a namespace api object, basename %s", f.BaseName))
 		namespace, err := f.CreateNamespace(ctx, f.BaseName, map[string]string{
@@ -259,9 +268,17 @@ func (f *Framework) BeforeEach(ctx context.Context) {
 			ginkgo.By("Waiting for a default service account to be provisioned in namespace")
 			err = WaitForDefaultServiceAccountInNamespace(ctx, f.ClientSet, namespace.Name)
 			ExpectNoError(err)
-			ginkgo.By("Waiting for kube-root-ca.crt to be provisioned in namespace")
-			err = WaitForKubeRootCAInNamespace(ctx, f.ClientSet, namespace.Name)
-			ExpectNoError(err)
+			// As of framework 1.24, VerifyServiceAccount true means the framework waits
+			// before every test for the kube-root-ca.crt ConfigMap to be provisioned
+			// [1]. But it will only be provisioned in clusters >= 1.20 because the
+			// feature RootCAConfigMap is alpha/unimplemented in older versions [2].
+			// [1] https://github.com/kubernetes/kubernetes/pull/107763
+			// [2] https://kubernetes.io/docs/reference/command-line-tools-reference/feature-gates/
+			if f.ClusterVersion.Major() == 1 && f.ClusterVersion.Minor() >= 20 {
+				ginkgo.By("Waiting for kube-root-ca.crt to be provisioned in namespace")
+				err = WaitForKubeRootCAInNamespace(ctx, f.ClientSet, namespace.Name)
+				ExpectNoError(err)
+			}
 		} else {
 			Logf("Skipping waiting for service account")
 		}
@@ -756,3 +773,4 @@ func (cl *ClusterVerification) ForEach(ctx context.Context, podFunc func(v1.Pod)
 
 	return err
 }
+
